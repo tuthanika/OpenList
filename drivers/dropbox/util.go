@@ -249,8 +249,9 @@ func (d *Dropbox) startUploadSession(ctx context.Context) (string, error) {
 }
 
 func (d *Dropbox) buildPathRootHeader() (string, error) {
-    return d.marshalToJSONString(map[string]interface{}{
+    return utils.Json.MarshalToString(map[string]interface{}{
         ".tag": "root",
         "root": d.RootNamespaceId,
     })
 }
+
