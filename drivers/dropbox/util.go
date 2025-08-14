@@ -176,10 +176,7 @@ func (d *Dropbox) finishUploadSession(ctx context.Context, toPath string, offset
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("Authorization", "Bearer "+d.AccessToken)
 	if d.RootNamespaceId != "" {
-	apiPathRootJson, err := utils.Json.MarshalToString(map[string]interface{}{
-	    ".tag": "root",
-	    "root": d.RootNamespaceId,
-	})
+	apiPathRootJson, err := d.buildPathRootHeader()
 	if err != nil {
 	    return err
 	}
@@ -230,10 +227,7 @@ func (d *Dropbox) startUploadSession(ctx context.Context) (string, error) {
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("Authorization", "Bearer "+d.AccessToken)
 	if d.RootNamespaceId != "" {
-	apiPathRootJson, err := utils.Json.MarshalToString(map[string]interface{}{
-	    ".tag": "root",
-	    "root": d.RootNamespaceId,
-	})
+	apiPathRootJson, err := d.buildPathRootHeader()
 	if err != nil {
 	    return "", err
 	}
@@ -252,4 +246,11 @@ func (d *Dropbox) startUploadSession(ctx context.Context) (string, error) {
 
 	_ = res.Body.Close()
 	return sessionId, nil
+}
+
+func (d *Dropbox) buildPathRootHeader() (string, error) {
+    return d.marshalToJSONString(map[string]interface{}{
+        ".tag": "root",
+        "root": d.RootNamespaceId,
+    })
 }
