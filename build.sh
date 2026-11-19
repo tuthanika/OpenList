@@ -12,6 +12,12 @@ if [ -n "$GITHUB_TOKEN" ]; then
   githubAuthArgs="--header \"Authorization: Bearer $GITHUB_TOKEN\""
 fi
 
+# Check for lite parameter
+useLite=false
+if [[ "$*" == *"lite"* ]]; then
+  useLite=true
+fi
+
 if [ "$1" = "dev" ]; then
   version="dev"
   webVersion="rolling"
@@ -27,6 +33,11 @@ fi
 
 echo "backend version: $version"
 echo "frontend version: $webVersion"
+if [ "$useLite" = true ]; then
+  echo "using lite frontend"
+else
+  echo "using standard frontend"
+fi
 
 ldflags="\
 -w -s \
@@ -85,35 +96,12 @@ AssertStaticBinary() {
   return 0
 }
 
-# Select the standard (non-lite) frontend dist tarball from a release asset list.
-# Released frontend versions still publish both `openlist-frontend-dist-<ver>.tar.gz`
-# and `openlist-frontend-dist-lite-<ver>.tar.gz`, so match the standard name exactly
-# instead of relying on the lite artifact being absent. Exactly one match is required:
-# a silent mismatch would hand a multi-line or empty string to curl.
-ResolveFrontendDistURL() {
-  local assets="$1"
-  local releaseName="$2"
-  local url
-  local count
-
-  url=$(printf '%s\n' "$assets" | grep -E "openlist-frontend-dist-v[0-9][^/]*\.tar\.gz$" || true)
-  count=$(printf '%s\n' "$url" | grep -c . || true)
-  if [ "$count" -ne 1 ]; then
-    echo "Error: expected exactly 1 standard frontend dist tarball in $releaseName, got $count" >&2
-    if [ "$count" -gt 0 ]; then
-      printf '%s\n' "$url" >&2
-    fi
-    return 1
-  fi
-
-  printf '%s\n' "$url"
-}
-
 FetchWebRolling() {
   pre_release_json=$(eval "curl -fsSL --max-time 2 $githubAuthArgs -H \"Accept: application/vnd.github.v3+json\" \"https://api.github.com/repos/$frontendRepo/releases/tags/edge\"")
   pre_release_assets=$(echo "$pre_release_json" | jq -r '.assets[].browser_download_url')
-
-  pre_release_tar_url=$(ResolveFrontendDistURL "$pre_release_assets" "edge")
+  
+  # There is no lite for rolling
+  pre_release_tar_url=$(echo "$pre_release_assets" | grep "openlist-frontend-dist" | grep -v "lite" | grep "\.tar\.gz$")
 
   curl -fsSL "$pre_release_tar_url" -o dist.tar.gz
   rm -rf public/dist && mkdir -p public/dist
@@ -124,7 +112,12 @@ FetchWebRolling() {
 FetchWebRelease() {
   release_json=$(eval "curl -fsSL --max-time 2 $githubAuthArgs -H \"Accept: application/vnd.github.v3+json\" \"https://api.github.com/repos/$frontendRepo/releases/latest\"")
   release_assets=$(echo "$release_json" | jq -r '.assets[].browser_download_url')
-  release_tar_url=$(ResolveFrontendDistURL "$release_assets" "${webVersion:-latest}")
+  
+  if [ "$useLite" = true ]; then
+    release_tar_url=$(echo "$release_assets" | grep "openlist-frontend-dist-lite" | grep "\.tar\.gz$")
+  else
+    release_tar_url=$(echo "$release_assets" | grep "openlist-frontend-dist" | grep -v "lite" | grep "\.tar\.gz$")
+  fi
   
   curl -fsSL "$release_tar_url" -o dist.tar.gz
   rm -rf public/dist && mkdir -p public/dist
@@ -570,39 +563,52 @@ MakeRelease() {
     rm -rv compress
   fi
   mkdir compress
-
+  
+  # Add -lite suffix if useLite is true
+  liteSuffix=""
+  if [ "$useLite" = true ]; then
+    liteSuffix="-lite"
+  fi
+  
   for i in $(find . -type f -name "$appName-linux-*"); do
     cp "$i" "$appName"
-    tar -czvf compress/"$i".tar.gz "$appName"
+    tar -czvf compress/"$i$liteSuffix".tar.gz "$appName"
     rm -f "$appName"
   done
     for i in $(find . -type f -name "$appName-android-*"); do
     cp "$i" "$appName"
-    tar -czvf compress/"$i".tar.gz "$appName"
+    tar -czvf compress/"$i$liteSuffix".tar.gz "$appName"
     rm -f "$appName"
   done
   for i in $(find . -type f -name "$appName-darwin-*"); do
     cp "$i" "$appName"
-    tar -czvf compress/"$i".tar.gz "$appName"
+    tar -czvf compress/"$i$liteSuffix".tar.gz "$appName"
     rm -f "$appName"
   done
   for i in $(find . -type f -name "$appName-freebsd-*"); do
     cp "$i" "$appName"
-    tar -czvf compress/"$i".tar.gz "$appName"
+    tar -czvf compress/"$i$liteSuffix".tar.gz "$appName"
     rm -f "$appName"
   done
   for i in $(find . -type f \( -name "$appName-windows-*" -o -name "$appName-windows7-*" \)); do
     cp "$i" "$appName".exe
-    zip compress/$(echo $i | sed 's/\.[^.]*$//').zip "$appName".exe
+    zip compress/$(echo $i | sed 's/\.[^.]*$//')$liteSuffix.zip "$appName".exe
     rm -f "$appName".exe
   done
   cd compress
-
-  find . -type f -print0 | xargs -0 md5sum >"$1"
-  cat "$1"
+  
+  # Handle MD5 filename - add -lite suffix only if not already present
+  md5FileName="$1"
+  if [ "$useLite" = true ] && [[ "$1" != *"-lite.txt" ]]; then
+    md5FileName=$(echo "$1" | sed 's/\.txt$/-lite.txt/')
+  fi
+  
+  find . -type f -print0 | xargs -0 md5sum >"$md5FileName"
+  cat "$md5FileName"
   cd ../..
 }
 
+# Parse parameters to handle lite parameter position flexibility
 buildType=""
 dockerType=""
 otherParam=""
@@ -618,6 +624,9 @@ for arg in "$@"; do
       if [ -z "$dockerType" ]; then
         dockerType="$arg"
       fi
+      ;;
+    lite)
+      # lite parameter is already handled above
       ;;
     *)
       if [ -z "$otherParam" ]; then
@@ -650,21 +659,41 @@ elif [ "$buildType" = "release" -o "$buildType" = "beta" ]; then
     BuildDockerMultiplatform
   elif [ "$dockerType" = "linux_musl_arm" ]; then
     BuildReleaseLinuxMuslArm
-    MakeRelease "md5-linux-musl-arm.txt"
+    if [ "$useLite" = true ]; then
+      MakeRelease "md5-linux-musl-arm-lite.txt"
+    else
+      MakeRelease "md5-linux-musl-arm.txt"
+    fi
   elif [ "$dockerType" = "linux_musl" ]; then
     BuildReleaseLinuxMusl
-    MakeRelease "md5-linux-musl.txt"
+    if [ "$useLite" = true ]; then
+      MakeRelease "md5-linux-musl-lite.txt"
+    else
+      MakeRelease "md5-linux-musl.txt"
+    fi
   elif [ "$dockerType" = "android" ]; then
     BuildReleaseAndroid
-    MakeRelease "md5-android.txt"
+    if [ "$useLite" = true ]; then
+      MakeRelease "md5-android-lite.txt"
+    else
+      MakeRelease "md5-android.txt"
+    fi
   elif [ "$dockerType" = "freebsd" ]; then
     BuildReleaseFreeBSD
-    MakeRelease "md5-freebsd.txt"
+    if [ "$useLite" = true ]; then
+      MakeRelease "md5-freebsd-lite.txt"
+    else
+      MakeRelease "md5-freebsd.txt"
+    fi
   elif [ "$dockerType" = "web" ]; then
     echo "web only"
   else
     BuildRelease
-    MakeRelease "md5.txt"
+    if [ "$useLite" = true ]; then
+      MakeRelease "md5-lite.txt"
+    else
+      MakeRelease "md5.txt"
+    fi
   fi
 elif [ "$buildType" = "prepare" ]; then
   if [ "$dockerType" = "docker-multiplatform" ]; then
@@ -672,19 +701,34 @@ elif [ "$buildType" = "prepare" ]; then
   fi
 elif [ "$buildType" = "zip" ]; then
   if [ -n "$otherParam" ]; then
-    MakeRelease "$otherParam.txt"
+    if [ "$useLite" = true ]; then
+      MakeRelease "$otherParam-lite.txt"
+    else
+      MakeRelease "$otherParam.txt"
+    fi
   elif [ -n "$dockerType" ]; then
-    MakeRelease "$dockerType.txt"
+    if [ "$useLite" = true ]; then
+      MakeRelease "$dockerType-lite.txt"
+    else
+      MakeRelease "$dockerType.txt"
+    fi
   else
-    MakeRelease "md5.txt"
+    if [ "$useLite" = true ]; then
+      MakeRelease "md5-lite.txt"
+    else
+      MakeRelease "md5.txt"
+    fi
   fi
 else
   echo -e "Parameter error"
-  echo -e "Usage: $0 {dev|beta|release|zip|prepare} [docker|docker-multiplatform|linux_musl_arm|linux_musl|android|freebsd|web] [other_params]"
+  echo -e "Usage: $0 {dev|beta|release|zip|prepare} [docker|docker-multiplatform|linux_musl_arm|linux_musl|android|freebsd|web] [lite] [other_params]"
   echo -e "Examples:"
   echo -e "  $0 dev"
+  echo -e "  $0 dev lite"
   echo -e "  $0 dev docker"
+  echo -e "  $0 dev docker lite"
   echo -e "  $0 release"
-  echo -e "  $0 release docker"
+  echo -e "  $0 release lite"
+  echo -e "  $0 release docker lite"
   echo -e "  $0 release linux_musl"
 fi
